@@ -19,11 +19,14 @@ dev = ["pytest>=7"]
 [project.scripts]
 buildopt = "buildopt.cli:main"
 
+[project.gui-scripts]
+buildopt-gui = "buildopt.gui.app:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-buildopt = ["data/*.json", "lcu/riotgames.pem"]
+buildopt = ["data/*.json", "data/*.png", "lcu/riotgames.pem"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,6 +1,48 @@
 # League Build Optimizer
 
-Recommends a **rune page + build path** scored against the five enemy champions in your lobby, then writes both into the League client during champ select so you never tab out.
+Recommends a **rune page + build path** scored against the five enemy champions in your lobby, then puts both into the League client during champ select so you never tab out.
+
+## How to use it (no programming needed)
+
+### 1. Download
+
+Go to **[Releases → latest](https://github.com/AiHost12345/League-content-gen/releases/latest)** and download:
+
+* **Windows:** `LeagueBuildOptimizer.exe`
+* **Mac:** `LeagueBuildOptimizer-Mac.zip` (double-click to unzip)
+
+There's nothing to install. Double-click the file to open it.
+
+> **"Windows protected your PC"?** The app isn't code-signed (signing costs money), so Windows warns about every new app. Click **More info → Run anyway**.
+> **Mac says it can't be opened?** Right-click the app → **Open** → **Open**.
+
+### 2. See it working (1 minute)
+
+Open the **Get Data** tab and click **No key? Try demo data**. This makes *fake* Briar games and shows what a recommendation looks like in **Try a Matchup**. Demo advice isn't real, and it's labelled "(demo)".
+
+### 3. Get real data
+
+1. Sign in at **[developer.riotgames.com](https://developer.riotgames.com/)** with your League account and copy the **Development API Key**.
+2. In **Get Data**, paste the key and click **Test key**.
+3. Pick your champion, role and regions, then click **Start collecting**.
+   * Leave the app open. A personal key is slow: expect roughly a day for 20,000 games.
+   * You can stop and start whenever you like. Progress is saved.
+   * The key **expires every 24 hours**. When collecting stops with a key error, get a new key, paste it, and press Start again.
+4. Click **Build recommendations**. It works with fewer games too, but the confidence will be lower.
+
+### 4. Play
+
+Keep the app open and start League. In champ select, the **Champ Select** tab shows your recommended runes, build and the reasons for them. When you lock in, the rune page and an item set (in the in-game shop's recommended tab) are added automatically, named `BO: …`. Your own rune pages are never deleted.
+
+Untick **"Put runes and item set into my client automatically"** if you only want to look.
+
+If the top-right corner keeps saying **League client: not found** while League is open, go to **Settings** and pick your League folder (the one with `LeagueClient.exe`).
+
+Your data lives in a `.buildopt` folder in your user folder (**Settings → Open data folder**).
+
+---
+
+## For developers
 
 It follows YordleDiff's approach (Wilson-scored, per-matchup win rates) and fixes these gaps:
 
@@ -17,7 +59,9 @@ It follows YordleDiff's approach (Wilson-scored, per-matchup win rates) and fixe
 
 ```bash
 pip install -e ".[dev]"      # Python 3.10+; numpy, requests, websocket-client
-pytest                        # 44 tests, ~25 s
+pytest                        # ~50 tests, ~25 s
+buildopt-gui                  # the desktop app
+python packaging/build.py     # build the one-file app into dist/ (needs pyinstaller)
 ```
 
 ## Try it without an API key
@@ -82,7 +126,10 @@ Every bundle carries one data version, e.g. `data 16.19-20261002-e65c89 · patch
 
 Host the `bundles/` folder on any static file host (or a shared folder) and point the app at it.
 
-## Champ select companion
+## Champ select companion (command line)
+
+The desktop app (`buildopt-gui`, `src/buildopt/gui/`) wraps everything below. The `Build desktop app` GitHub workflow tests, builds the Windows `.exe` and Mac app with PyInstaller, and publishes them to the `latest` release.
+
 
 ```bash
 buildopt companion --source https://your-host/bundles        # Tk window

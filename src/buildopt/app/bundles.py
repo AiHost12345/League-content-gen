@@ -56,7 +56,7 @@ def sync_bundles(source: str, dest: str | Path) -> list[str]:
 class BundleCache:
     def __init__(self, bundle_dir: str | Path):
         self.dir = Path(bundle_dir)
-        self._scorers: dict[tuple[int, str], Scorer] = {}
+        self._scorers: dict[tuple[int, str], tuple[float, Scorer]] = {}
 
     def available(self) -> dict[tuple[int, str], dict]:
         idx = self.dir / "index.json"
@@ -73,12 +73,15 @@ class BundleCache:
                 return None
             role = roles[0]
         key = (champion_id, role)
-        if key not in self._scorers:
-            path = self.dir / bundle_filename(champion_id, role)
-            if not path.exists():
-                return None
-            self._scorers[key] = Scorer(json.loads(path.read_text(encoding="utf-8")))
-        return self._scorers[key]
+        path = self.dir / bundle_filename(champion_id, role)
+        if not path.exists():
+            return None
+        mtime = path.stat().st_mtime
+        cached = self._scorers.get(key)
+        if cached is None or cached[0] != mtime:  # reload when the bundle was rebuilt
+            cached = (mtime, Scorer(json.loads(path.read_text(encoding="utf-8"))))
+            self._scorers[key] = cached
+        return cached[1]
 
     def clear(self) -> None:
         self._scorers.clear()

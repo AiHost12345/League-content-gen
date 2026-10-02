@@ -153,39 +153,52 @@ class Companion:
 
     # ---- view --------------------------------------------------------------
     def view(self, scorer: Scorer, rec: Recommendation, state: ChampSelectState, roles: dict, ms: float) -> View:
-        b = rec.best
-        runner = None
-        if rec.runner_up:
-            r = rec.runner_up
-            runner = (f"{scorer.perk(r.keystone)} · {scorer.path_label(r.path)} · {r.win_rate:.1%} "
-                      f"({(r.win_rate - b.win_rate) * 100:+.1f} pts)")
-        extras = []
-        wc = scorer.bundle.get("wincon")
-        if wc and state.enemies:
-            allies = list(state.allies.values())
-            if state.my_champion not in allies:
-                allies.append(state.my_champion)
-            a = wincon.analyze(allies, state.enemies, wc)
-            extras.append(f"Win condition: {a['your_archetype']} vs {a['enemy_archetype']} · {a['advice']}")
-        if scorer.bundle.get("jungle") and state.my_role == "JUNGLE":
-            enemy_jg = next((c for c, r in roles.items() if r == "JUNGLE"), None)
-            routes = jungle.best_routes(scorer.bundle["jungle"], enemy_jg, top=1)
-            if routes:
-                vs = f" vs {scorer.champion(routes[0]['vs'])}" if routes[0]["vs"] else ""
-                extras.append(f"First clear{vs}: {routes[0]['route']} ({routes[0]['win_rate']:.1%})")
+        v = recommendation_view(scorer, rec, roles, allies=state.allies, my_champion=state.my_champion,
+                                enemies=state.enemies, my_role=state.my_role)
+        v.change = self.change
+        v.read_only = not self.imports_enabled
+        v.score_ms = ms
+        return v
+
+
+def recommendation_view(scorer: Scorer, rec: Recommendation, roles: dict, allies: dict | None = None,
+                        my_champion: int | None = None, enemies: list[int] | None = None,
+                        my_role: str | None = None) -> View:
+    """Plain-data view of a recommendation, shared by the companion and the GUI."""
+    b = rec.best
+    enemies = enemies or []
+    allies = allies or {}
+    runner = None
+    if rec.runner_up:
+        r = rec.runner_up
+        runner = (f"{scorer.perk(r.keystone)} · {scorer.path_label(r.path)} · {r.win_rate:.1%} "
+                  f"({(r.win_rate - b.win_rate) * 100:+.1f} pts)")
+    extras = []
+    wc = scorer.bundle.get("wincon")
+    team = list(allies.values())
+    if my_champion and my_champion not in team:
+        team.append(my_champion)
+    if wc and enemies and len(team) >= 2:  # needs at least some of your team to say anything useful
+        a = wincon.analyze(team, enemies, wc)
+        extras.append(f"Win condition: {a['your_archetype']} vs {a['enemy_archetype']} · {a['advice']}")
+    if scorer.bundle.get("jungle") and (my_role or scorer.bundle["role"]) == "JUNGLE":
+        enemy_jg = next((c for c, r in roles.items() if r == "JUNGLE"), None)
+        routes = jungle.best_routes(scorer.bundle["jungle"], enemy_jg, top=1)
+        if routes:
+            vs = f" vs {scorer.champion(routes[0]['vs'])}" if routes[0]["vs"] else ""
+            extras.append(f"First clear{vs}: {routes[0]['route']} ({routes[0]['win_rate']:.1%})")
+        if allies:
             enemies_by_role = {r: c for c, r in roles.items()}
-            ganks = jungle.gank_priority(state.allies, enemies_by_role, scorer.profiles)
+            ganks = jungle.gank_priority(allies, enemies_by_role, scorer.profiles)
             if ganks:
                 extras.append("Gank priority: " + " > ".join(g["lane"].lower() for g in ganks))
-        return View(
-            header=f"{scorer.bundle['champion_name']} {scorer.bundle['role'].lower()} · {rec.data_version}",
-            runes=f"{scorer.page_label(b.page)} · {', '.join(scorer.perk(s) for s in rec.shards)}",
-            build=scorer.path_label(b.path),
-            win=f"{b.win_rate:.1%} (95% {b.lo:.1%}–{b.hi:.1%}) · {b.confidence} confidence",
-            why=rec.why,
-            runner_up=runner,
-            change=self.change,
-            extras=extras,
-            read_only=not self.imports_enabled,
-            score_ms=ms,
-        )
+    return View(
+        header=f"{scorer.bundle['champion_name']} {scorer.bundle['role'].lower()} · {rec.data_version}",
+        runes=f"{scorer.page_label(b.page)} · {', '.join(scorer.perk(s) for s in rec.shards)}",
+        build=scorer.path_label(b.path),
+        win=f"{b.win_rate:.1%} (95% {b.lo:.1%}–{b.hi:.1%}) · {b.confidence} confidence",
+        why=rec.why,
+        runner_up=runner,
+        change=None,
+        extras=extras,
+    )

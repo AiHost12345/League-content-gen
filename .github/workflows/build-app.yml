@@ -1,0 +1,75 @@
+name: Build desktop app
+
+# Runs the tests, builds the Windows .exe and the macOS app, and publishes
+# them on the "latest" release so there is always one download link:
+# https://github.com/<owner>/<repo>/releases/latest
+on:
+  push:
+    branches: [main, master, "claude/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: LeagueBuildOptimizer-Windows
+          - os: macos-latest
+            artifact: LeagueBuildOptimizer-Mac
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install . pyinstaller
+      - run: python packaging/build.py
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item dist/LeagueBuildOptimizer.exe out/LeagueBuildOptimizer.exe
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p out
+          cd dist && ditto -c -k --keepParent LeagueBuildOptimizer.app ../out/LeagueBuildOptimizer-Mac.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: out/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          ls -la artifacts
+          gh release delete latest --repo "$REPO" --yes --cleanup-tag || true
+          gh release create latest artifacts/* --repo "$REPO" --target "$GITHUB_SHA" \
+            --title "League Build Optimizer (latest build)" \
+            --notes "Download **LeagueBuildOptimizer.exe** (Windows) or **LeagueBuildOptimizer-Mac.zip** (Mac) below and double-click it. Built from ${GITHUB_SHA::7}. See the README for first-time setup."

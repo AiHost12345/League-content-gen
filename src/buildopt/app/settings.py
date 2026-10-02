@@ -22,7 +22,21 @@ class Settings:
     bundle_dir: str = field(default_factory=lambda: str(app_dir() / "bundles"))
     league_path: str | None = None
     final_write_lead_ms: int = 3000  # final write this long before finalization ends
+    # Data collection (desktop app "Get data" tab)
+    api_key: str = ""
+    regions: list[str] = field(default_factory=lambda: ["na1", "euw1", "kr"])
+    champion: str = "Briar"
+    role: str = "JUNGLE"
+    target_games: int = 20000
     path: str = field(default="", repr=False)
+
+    @property
+    def db_path(self) -> Path:
+        return app_dir() / "games.sqlite"
+
+    @property
+    def demo_db_path(self) -> Path:
+        return app_dir() / "demo.sqlite"
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> "Settings":
