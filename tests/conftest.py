@@ -16,7 +16,7 @@ def static():
 @pytest.fixture(scope="session")
 def synth_store(static, tmp_path_factory):
     store = Store(tmp_path_factory.mktemp("db") / "syn.sqlite")
-    generate(store, static, n_matches=9000, seed=11, target_frac=1.0)
+    generate(store, static, n_matches=20000, seed=11, target_frac=1.0)
     return store
 
 

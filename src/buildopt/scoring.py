@@ -55,6 +55,7 @@ class Recommendation:
     shards: tuple[int, int, int]
     ranked: list[Loadout] = field(default_factory=list)
     known: int = 5  # enemies locked when this was scored
+    min_games: int = 0  # builds below this weren't eligible to be the recommendation
 
     def to_dict(self) -> dict:
         return {
@@ -101,57 +102,100 @@ class Scorer:
 
     # ---- scoring -----------------------------------------------------------
     def _precompute(self):
+        """Pull the coefficient blocks out once so every build x page can be scored with array maths."""
         m = self.model
-        combos = [(pi, ri) for pi in range(len(m.paths)) for ri in range(len(m.pages))]
-        zero = np.zeros(m.T)
-        A = np.vstack([m.row(pi, ri, zero) for pi, ri in combos])  # comp-independent part
-        # Trait-dependent columns: x = A + sum_j cz_j * B_j
         lay = m.layout()
-        B = np.zeros((m.T, len(combos), m.n_features))
-        for c, (pi, ri) in enumerate(combos):
-            k = m.keystones.index(m.pages[ri][2])
-            for j in range(m.T):
-                B[j, c, lay["trait"][0] + j] = 1.0
-                B[j, c, lay["path_trait"][0] + pi * m.T + j] = 1.0
-                B[j, c, lay["keystone_trait"][0] + k * m.T + j] = 1.0
-        info = self.bundle.get("path_info", [])
-        games = {}
-        for d in info:
-            games[tuple(d["path"])] = d["games"]
-        return combos, A, B, games
+        beta, T = m.beta, m.T
+        P, R = len(m.paths), len(m.pages)
+
+        def block(name):
+            a, b = lay[name]
+            return beta[a:b]
+
+        D = np.zeros((P, T))  # how each build's value shifts with each trait (0 for rare builds)
+        pt = block("path_trait")
+        for ti, pi in enumerate(m.trait_paths):
+            D[pi] = pt[ti * T:(ti + 1) * T]
+        PR = np.zeros((P, R))
+        pr = block("pair")
+        for idx, (pi, ri) in enumerate(m.pairs):
+            PR[pi, ri] = pr[idx]
+        games = {tuple(d["path"]): d["games"] for d in self.bundle.get("path_info", [])}
+        # Real builds to rank: those with their own model term, plus every rare build on top of its group.
+        entries = [(tuple(p), i, 0.0, 0.0, games.get(tuple(p), 0)) for i, p in enumerate(m.paths) if 0 not in p]
+        entries += [(tuple(r["path"]), r["group"], r["delta"], r["var"], r["games"])
+                    for r in self.bundle.get("rare_paths", [])]
+        return {
+            "entries": entries,
+            "e_term": np.array([e[1] for e in entries], int),
+            "e_delta": np.array([e[2] for e in entries], float),
+            "b0": beta[lay["intercept"][0]], "bp": block("path"), "br": block("page"), "g": block("trait"),
+            "D": D, "K": block("keystone_trait").reshape(len(m.keystones), T),
+            "key_of_page": np.array([m.keystones.index(p[2]) for p in m.pages], int), "PR": PR,
+            "enemy": block("enemy"),
+        }
 
     def traits(self, enemies: Sequence[int]) -> list[float]:
         return trait_vector(enemies, self.profiles)
 
-    def score(self, enemies: Sequence[int], enemy_roles: dict[int, str] | None = None) -> list[Loadout]:
-        m = self.model
-        combos, A, B, path_games = self._base
-        c_raw = self.traits(enemies)
-        cz = m.standardise_traits(c_raw)
-        X = A + np.tensordot(cz, B, axes=1)
-        if enemy_roles:
-            terms = {(int(c), r) for c, r in enemy_roles.items()}
-            a = m.layout()["enemy"][0]
-            for j, t in enumerate(m.enemy_terms):
-                if t in terms:
-                    X[:, a + j] = 1.0
-        eta = X @ m.beta
-        var = np.einsum("ij,jk,ik->i", X, m.cov, X)
-        probs, slopes = m.marginal(eta)
+    def score(self, enemies: Sequence[int], enemy_roles: dict[int, str] | None = None,
+              rank_by: str = "win_rate", detail: int = 120) -> list[Loadout]:
+        """Score every build players finished x every rune page for this comp.
+
+        rank_by="win_rate": highest adjusted win rate first, every build eligible.
+        rank_by="lower_bound": safest first (Wilson lower bound), which favours builds with lots of games.
+        Returns the best page for every build plus the top combinations overall, with intervals.
+        """
+        m, b = self.model, self._base
+        cz = m.standardise_traits(self.traits(enemies))
+        enemy_set = {(int(c), r) for c, r in (enemy_roles or {}).items()}
+        enemy_shift = sum(b["enemy"][j] for j, t in enumerate(m.enemy_terms) if t in enemy_set)
+        eta = (b["b0"] + b["bp"][:, None] + b["br"][None, :] + float(b["g"] @ cz) + (b["D"] @ cz)[:, None]
+               + (b["K"] @ cz)[b["key_of_page"]][None, :] + b["PR"] + enemy_shift)
+        eta = eta[b["e_term"]] + b["e_delta"][:, None]  # one row per real build
+        prob, slope = m.marginal(eta)
+        E, R = prob.shape
+        best_page = prob.argmax(axis=1)
+        chosen = {(e, int(best_page[e])) for e in range(E)}
+        flat = np.argsort(-prob, axis=None)[: (detail if rank_by == "win_rate" else max(detail, 3 * E))]
+        chosen |= {(int(i // R), int(i % R)) for i in flat}
+        chosen = sorted(chosen)
+
+        # Model variance depends only on (model term, page): compute each distinct one once.
+        terms = sorted({(int(b["e_term"][e]), ri) for e, ri in chosen})
+        X = np.vstack([m.row(t, ri, cz, None, enemy_set) for t, ri in terms])
+        var = dict(zip(terms, np.einsum("ij,jk,ik->i", X, m.cov, X)))
         out = []
-        for (pi, ri), p, d, v in zip(combos, probs, slopes, var):
-            p = float(p)
+        for e, ri in chosen:
+            path, term, _, extra_var, games = b["entries"][e]
+            p, d = float(prob[e, ri]), float(slope[e, ri])
             # Effective sample size implied by the model's uncertainty (delta method on the marginal rate).
-            n_eff = p * (1 - p) / max(d * d * v, 1e-12)
+            n_eff = p * (1 - p) / max(d * d * (var[(term, ri)] + extra_var), 1e-12)
             lo, hi = wilson_interval(p, n_eff)
-            games = path_games.get(m.paths[pi], 0)
-            out.append(Loadout(pi, ri, m.paths[pi], m.pages[ri], p, lo, hi, n_eff, games,
+            out.append(Loadout(term, ri, path, m.pages[ri], p, lo, hi, n_eff, games,
                                confidence_label(min(games, n_eff), lo, hi)))
-        out.sort(key=lambda l: -l.lo)
+        key = (lambda l: -l.lo) if rank_by == "lower_bound" else (lambda l: -l.win_rate)
+        out.sort(key=key)
         return out
 
-    def recommend(self, enemies: Sequence[int], enemy_roles: dict[int, str] | None = None) -> Recommendation:
-        ranked = self.score(enemies, enemy_roles)
+    @staticmethod
+    def top_builds(ranked: list[Loadout], n: int = 5) -> list[Loadout]:
+        """The n best distinct build paths for this comp, each on its best rune page."""
+        out, seen = [], set()
+        for l in ranked:
+            if l.path not in seen:
+                seen.add(l.path)
+                out.append(l)
+            if len(out) == n:
+                break
+        return out
+
+    def recommend(self, enemies: Sequence[int], enemy_roles: dict[int, str] | None = None,
+                  rank_by: str = "win_rate", min_games: int = 20) -> Recommendation:
+        """Best loadout for this comp. Every build is scored; the one recommended (and imported) must have
+        at least ``min_games`` games so a couple of lucky games can't decide your build. ``ranked`` keeps all."""
+        all_ranked = self.score(enemies, enemy_roles, rank_by=rank_by)
+        ranked = [l for l in all_ranked if l.games >= min_games] or all_ranked
         best = ranked[0]
         runner = next((l for l in ranked if l.keystone != best.keystone), None)
         alt = next((l for l in ranked if l.page_i == best.page_i and l.path[:2] != best.path[:2]), None) or \
@@ -160,7 +204,7 @@ class Scorer:
         return Recommendation(
             best=best, runner_up=runner, alt_path=alt, why=self.explain(best, c_raw, ranked),
             traits=c_raw, data_version=self.data_version, shards=tuple(self.bundle["page_shards"][best.page_i]),
-            ranked=ranked, known=len([e for e in enemies if e]),
+            ranked=all_ranked, known=len([e for e in enemies if e]), min_games=min_games,
         )
 
     # ---- explanations ------------------------------------------------------
@@ -173,9 +217,13 @@ class Scorer:
 
         def coefs(l: Loadout) -> np.ndarray:
             k = m.keystones.index(l.keystone)
-            p0 = lay["path_trait"][0] + l.path_i * T
             k0 = lay["keystone_trait"][0] + k * T
-            return m.beta[p0:p0 + T] + m.beta[k0:k0 + T]
+            out = m.beta[k0:k0 + T].copy()
+            ti = m.trait_index.get(l.path_i)
+            if ti is not None:
+                p0 = lay["path_trait"][0] + ti * T
+                out += m.beta[p0:p0 + T]
+            return out
 
         d = (coefs(a) - coefs(b)) * cz
         return sorted(zip(TRAITS, d.tolist()), key=lambda t: -t[1])
@@ -228,8 +276,12 @@ class Scorer:
         a, b = new.best, old.best
         if a.path != b.path:
             head = next(f"{self.item(y)} → {self.item(x)}" for x, y in zip(a.path, b.path) if x != y)
-        else:
+        elif a.keystone != b.keystone:
             head = f"{self.perk(b.keystone)} → {self.perk(a.keystone)}"
+        else:  # same keystone, different minor runes
+            gone = [p for p in b.page[3:] if p not in a.page[3:]]
+            new_ = [p for p in a.page[3:] if p not in b.page[3:]]
+            head = f"{', '.join(self.perk(p) for p in gone)} → {', '.join(self.perk(p) for p in new_)}"
         # The trait that changed since the last pick and now pushes hardest toward the new loadout.
         changed = {t for t, x, y in zip(TRAITS, new.traits, old.traits) if abs(x - y) > 1e-6}
         best_t = next((t for t, contrib in self.contributions(a, b, new.traits) if t in changed and contrib > 0), None)
@@ -284,7 +336,7 @@ class Scorer:
         """Model score for a shorter path (e.g. Collector → BC): best page, weighted over its 3-item extensions."""
         ranked = self.score(enemies)
         page = ranked[0].page_i
-        opts = [l for l in ranked if l.page_i == page and l.path[:len(prefix)] == tuple(prefix)]
+        opts = [l for l in self.top_builds(ranked, len(ranked)) if l.path[:len(prefix)] == tuple(prefix)]
         if not opts:
             return None
         w = np.array([max(l.games, 1) for l in opts], float)

@@ -4,7 +4,7 @@ import time
 from buildopt.bundle import load_bundle, save_bundle
 from buildopt.itemset import build_item_set
 from buildopt.lcu.champselect import assign_roles
-from buildopt.pipeline.synthetic import COLLECTOR, TITANIC
+from buildopt.pipeline.synthetic import BORK, COLLECTOR, TITANIC
 from buildopt.scoring import Scorer, format_recommendation
 
 TANKY = ["Ornn", "Sejuani", "Galio", "Ashe", "Braum"]
@@ -28,7 +28,7 @@ def test_recommendation_moves_with_tanks(bundle, static):
     sc = Scorer(bundle)
     tanky = sc.recommend(ids(static, TANKY))
     squishy = sc.recommend(ids(static, SQUISHY))
-    assert tanky.best.path[0] == TITANIC
+    assert tanky.best.path[0] in (TITANIC, BORK)
     assert squishy.best.path[0] == COLLECTOR
     assert tanky.why and squishy.why
     for rec in (tanky, squishy):
@@ -40,10 +40,21 @@ def test_recommendation_moves_with_tanks(bundle, static):
     assert "Titanic Hydra" in text and "data 16.19" in text
 
 
-def test_ranked_by_wilson_lower_bound(bundle, static):
-    ranked = Scorer(bundle).score(ids(static, TANKY))
-    los = [l.lo for l in ranked]
-    assert los == sorted(los, reverse=True)
+def test_ranking_modes(bundle, static):
+    sc = Scorer(bundle)
+    by_rate = [l.win_rate for l in sc.score(ids(static, TANKY))]
+    assert by_rate == sorted(by_rate, reverse=True)  # default: highest win rate first
+    by_lo = [l.lo for l in sc.score(ids(static, TANKY), rank_by="lower_bound")]
+    assert by_lo == sorted(by_lo, reverse=True)
+
+
+def test_every_build_is_scored(bundle, games):
+    """No shortlist: every 3-item build that appears in the data is in the model and gets a score."""
+    seen = {g.path[:3] for g in games if len(g.path) >= 3}
+    model_paths = {tuple(p) for p in bundle["model"]["paths"]}
+    assert seen == model_paths
+    ranked = Scorer(bundle).score([])
+    assert {l.path for l in ranked} == model_paths
 
 
 def test_scoring_is_fast(bundle, static):
@@ -60,7 +71,7 @@ def test_change_reason(bundle, static):
     old = sc.recommend(ids(static, TANKY))
     new = sc.recommend(ids(static, SQUISHY))
     reason = sc.change_reason(old, new)
-    assert reason.startswith("Titanic Hydra → The Collector")
+    assert reason.split(":")[0] in ("Titanic Hydra → The Collector", "Blade of The Ruined King → The Collector")
 
 
 def test_item_set_blocks(bundle, static):
@@ -81,3 +92,18 @@ def test_enemy_role_assignment(bundle, static):
     roles = assign_roles(ids(static, ["Jinx", "Thresh", "Lee Sin", "Ahri", "Darius"]), bundle["profiles"])
     by_name = {static.champion_name(c): r for c, r in roles.items()}
     assert by_name == {"Jinx": "BOTTOM", "Thresh": "UTILITY", "Lee Sin": "JUNGLE", "Ahri": "MIDDLE", "Darius": "TOP"}
+
+
+def test_top_builds_include_bork_into_tanks(bundle, static):
+    sc = Scorer(bundle)
+    rec = sc.recommend(ids(static, TANKY))
+    firsts = [l.path[0] for l in sc.top_builds(rec.ranked, 5)]
+    assert len(set(l.path for l in sc.top_builds(rec.ranked, 5))) == 5
+    assert BORK in firsts
+
+
+def test_first_item_stats(bundle):
+    firsts = {d["id"]: d for d in bundle["first_items"]}
+    assert {COLLECTOR, TITANIC, BORK} <= set(firsts)
+    bork = firsts[BORK]
+    assert bork["vs_2plus_tanks"]["games"] + bork["vs_0_1_tanks"]["games"] == bork["games"]

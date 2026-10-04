@@ -32,7 +32,7 @@ Open the **Get Data** tab and click **No key? Try demo data**. This makes *fake*
 
 ### 4. Play
 
-Keep the app open and start League. In champ select, the **Champ Select** tab shows your recommended runes, build and the reasons for them. When you lock in, the rune page and an item set (in the in-game shop's recommended tab) are added automatically, named `BO: …`. Your own rune pages are never deleted.
+Keep the app open and start League. In champ select, the **Champ Select** tab shows your recommended runes, build, other strong builds and the reasons. When you lock in, the rune page and an item set are added automatically, both named `BO: …`. In game, pick the `BO:` set from the shop's item set list. The **Last import** box shows whether each one worked; if something fails, click **Open log file** and send it over. Your own rune pages are never deleted.
 
 Untick **"Put runes and item set into my client automatically"** if you only want to look.
 
@@ -107,8 +107,8 @@ buildopt crawl --db data/games.sqlite --platform euw1 --platform na1 --platform 
   * pair synergy, `lift(A,B) = logit WR(A∩B) − logit WR(A) − logit WR(B) + logit WR(champ)`;
   * conditional comparison: games at the decision point only (first k items exactly A or B), weighted by inverse propensity on gold lead and minute at first item, then split by comp condition, game length and decision-item minute. Paths under 50 games are hidden and 50–200 games are labelled low confidence.
 * **Joint model** (`analysis/model.py`): `logit P(win) = β_path + β_rune + γᵀc + δ_pathᵀc + κ_keystoneᵀc + β_path×rune + θᵀs + per-matchup terms`. It is ridge-penalised: main effects shrink toward the champion average, and interactions shrink toward zero unless the data supports them. Penalty strength per group (interactions, path×page, matchup, main) is picked by 3-fold cross-validation.
-* **Candidates** (`analysis/candidates.py`): the top 8 rune pages plus single swaps (keystone, secondary tree, one minor) above the threshold, and every first-three-item prefix above the threshold.
-* **Scoring** (`scoring.py`): every page × path pair is scored for the current comp and ranked by the **Wilson lower bound** of the adjusted win rate. The effective sample size comes from the model's uncertainty for that loadout. Win rates are averaged over the game states seen in training, because gold lead isn't known in champ select. Output: the best loadout, the runner-up with a different keystone, the alt path, and 2–3 "why" lines such as `0 tanks → The Collector over Titanic Hydra`.
+* **Builds — no shortlist** (`analysis/candidates.py`): every 3-item build players finished is scored. Builds with 30+ games get their own model term; rarer builds are fitted through a group sharing their first two items (or first item), then each gets its own win-rate adjustment from its own games, shrunk toward the group so a few lucky games can't fake a high win rate. Rune pages: the top 8 plus single swaps (keystone, secondary tree, one minor).
+* **Scoring** (`scoring.py`): every build × page is scored for the current comp and ranked by **adjusted win rate** (or, as a setting, by the Wilson lower bound). The recommended/imported build needs at least 20 games by default (Settings; 1 = any build); every build is listed in **All builds for this comp**. The effective sample size comes from the model's uncertainty for that loadout. Win rates are averaged over the game states seen in training, because gold lead isn't known in champ select. Output: the best loadout, the runner-up with a different keystone, the alt path, and 2–3 "why" lines such as `0 tanks → The Collector over Titanic Hydra`.
 
 ## Stats bundle
 
@@ -150,7 +150,7 @@ Settings live in `~/.buildopt/settings.json`: `auto_import`, `bundle_source`, `l
   * Writes happen only in `ChampSelect`.
   * Only pages and sets whose name starts with `BO:` are touched; user pages are never deleted.
   * At the rune page limit the app asks once which page it may own, and remembers the answer.
-  * The item set has these blocks: Start · Core (boots placed where the data puts them) · Situational anti-heal / armor / MR / survive (with the reason, e.g. `vs heavy healing`) · Late game · Alt path.
+  * The item set has these blocks: Start · Core (boots placed where the data puts them) · Situational anti-tank / anti-heal / armor / MR / survive (with the reason, e.g. `vs heavy healing`) · Late game · Alt path.
 * **Scope:** only what champ select shows. No enemy names, ranks, histories or dodge advice.
 
 ## Later modules (first versions included)

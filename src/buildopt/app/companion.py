@@ -15,6 +15,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Protocol
 
 from buildopt.analysis import jungle, wincon
@@ -22,10 +23,21 @@ from buildopt.app.bundles import BundleCache
 from buildopt.itemset import build_item_set
 from buildopt.lcu.champselect import ChampSelectState, assign_roles, parse_session
 from buildopt.lcu.connection import LcuError
-from buildopt.lcu.importer import ImportBlocked, Importer
+from buildopt.lcu.importer import ImportBlocked, ImportFailed, Importer
 from buildopt.scoring import Recommendation, Scorer
 
 log = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _names() -> dict:
+    from buildopt import ddragon
+
+    return {int(k): c["name"] for k, c in ddragon.load(offline=True).champions.items()}
+
+
+def champion_name(cid: int) -> str:
+    return _names().get(int(cid), f"champion {cid}")
 
 
 class UI(Protocol):
@@ -46,6 +58,7 @@ class View:
     runner_up: str | None
     change: str | None
     extras: list[str] = field(default_factory=list)
+    other_builds: list[str] = field(default_factory=list)
     read_only: bool = False
     score_ms: float = 0.0
 
@@ -72,6 +85,7 @@ class Companion:
         self.written: tuple | None = None  # (loadout key, enemy key) last written
         self.final_timer: threading.Timer | None = None
         self.change: str | None = None
+        self.last_import: dict | None = None
 
     @property
     def imports_enabled(self) -> bool:
@@ -96,14 +110,17 @@ class Companion:
         scorer = self.cache.scorer(state.my_champion, state.my_role)
         if scorer is None:
             self.scorer = None
-            self.ui.status(f"No data for champion {state.my_champion} {state.my_role or ''}".strip())
+            who = f"{champion_name(state.my_champion)} {(state.my_role or '').lower()}".strip()
+            self.ui.status(f"No recommendations for {who} yet. Collect games for it in the Get Data tab "
+                           "(only champions you've built recommendations for get imports).")
             return
         if scorer is not self.scorer:
             self.scorer, self.rec, self.written = scorer, None, None
 
         t0 = self.clock()
         roles = assign_roles(state.enemies, scorer.profiles)
-        rec = scorer.recommend(state.enemies, roles)
+        rec = scorer.recommend(state.enemies, roles, rank_by=getattr(self.settings, "rank_by", "win_rate"),
+                               min_games=getattr(self.settings, "min_build_games", 20))
         ms = (self.clock() - t0) * 1000
         if self.rec is not None and rec.best.key != self.rec.best.key:
             self.change = scorer.change_reason(self.rec, rec)
@@ -132,24 +149,42 @@ class Companion:
 
     # ---- import ------------------------------------------------------------
     def write(self) -> bool:
+        """Write the rune page and the item set independently, so one failing never blocks the other."""
         scorer, rec, state = self.scorer, self.rec, self.state
         if not (scorer and rec and state and self.importer):
             return False
         page = rec.best.page
         name = f"{scorer.bundle['champion_name']} {scorer.perk(page[2])}"
+        item_set = build_item_set(scorer, rec, self.settings.page_prefix)
+        result = {"runes": self._attempt(lambda: self.importer.write_rune_page(
+                      name, page[0], page[1], list(page[2:]), list(rec.shards)), f"'{self.settings.page_prefix} {name}'"),
+                  "items": self._attempt(lambda: self.importer.write_item_set(item_set), f"'{item_set['title']}'")}
+        self.last_import = result
+        report = getattr(self.ui, "import_result", None)
+        if report:
+            report(result)
+        ok = result["runes"][0] or result["items"][0]
+        if ok:
+            self.written = (rec.best.key, state.enemy_key)
+        parts = [f"Runes {'written' if result['runes'][0] else 'FAILED'}",
+                 f"item set {'written' if result['items'][0] else 'FAILED'}"]
+        self.ui.status(", ".join(parts) + (f" · {self.change}" if self.change and ok else ""))
+        return result["runes"][0] and result["items"][0]
+
+    @staticmethod
+    def _attempt(fn, what: str) -> tuple[bool, str]:
         try:
-            self.importer.write_rune_page(name, page[0], page[1], list(page[2:]), list(rec.shards))
-            self.importer.write_item_set(build_item_set(scorer, rec, self.settings.page_prefix))
-        except ImportBlocked as e:
-            self.ui.status(f"Import skipped: {e}")
-            return False
+            fn()
+        except (ImportBlocked, ImportFailed) as e:
+            log.warning("import of %s skipped: %s", what, e)
+            return False, f"{what}: {e}"
         except LcuError as e:
-            log.warning("import failed: %s", e)
-            self.ui.status(f"Import failed: {e}")
-            return False
-        self.written = (rec.best.key, state.enemy_key)
-        self.ui.status("Rune page and item set written" + (f" · {self.change}" if self.change else ""))
-        return True
+            log.warning("import of %s failed: %s", what, e)
+            return False, f"{what}: the client refused it ({e})"
+        except Exception as e:  # never let one write take the app down
+            log.exception("import of %s crashed", what)
+            return False, f"{what}: {e}"
+        return True, what
 
     # ---- view --------------------------------------------------------------
     def view(self, scorer: Scorer, rec: Recommendation, state: ChampSelectState, roles: dict, ms: float) -> View:
@@ -201,4 +236,7 @@ def recommendation_view(scorer: Scorer, rec: Recommendation, roles: dict, allies
         runner_up=runner,
         change=None,
         extras=extras,
+        other_builds=[f"{scorer.path_label(l.path)} · {l.win_rate:.1%} ({l.games:,} games)"
+                      for l in Scorer.top_builds([l for l in rec.ranked if l.games >= rec.min_games], 6)
+                      if l.path != b.path][:5],
     )

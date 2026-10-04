@@ -13,7 +13,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from buildopt.analysis import jungle, wincon
-from buildopt.analysis.candidates import candidate_pages, candidate_paths, page_shards
+from buildopt.analysis.candidates import candidate_pages, candidate_paths, model_paths, page_shards
 from buildopt.analysis.dataset import DatasetConfig, Game, load_games
 from buildopt.analysis.model import LoadoutModel, Penalties, build_model, tune_penalties
 from buildopt.analysis.profiles import build_profiles
@@ -25,7 +25,7 @@ from buildopt.stats import MIN_GAMES, weighted_win_rate
 SCHEMA_VERSION = 1
 
 # Which comp trait makes each situational category relevant, and in which direction.
-CATEGORY_TRAIT = {"anti-heal": ("healing", "high"), "armor": ("ap_share", "low"), "mr": ("ap_share", "high"),
+CATEGORY_TRAIT = {"anti-tank": ("tanks", "high"), "anti-heal": ("healing", "high"), "armor": ("ap_share", "low"), "mr": ("ap_share", "high"),
                   "survive": ("burst", "high")}
 
 
@@ -77,6 +77,27 @@ def late_items(games: list[Game], min_games: int) -> list[dict]:
     return out
 
 
+def first_item_stats(games: list[Game], min_games: int = 20) -> list[dict]:
+    """Every first item players finished, with win rates split by how many tanks the enemy had."""
+    tidx = TRAITS.index("tanks")
+    per: dict[int, list[Game]] = defaultdict(list)
+    for g in games:
+        per[g.path[0]].append(g)
+    out = []
+    for item, gs in per.items():
+        if len(gs) < min_games:
+            continue
+        few = [g for g in gs if round(g.c_raw[tidx]) <= 1]
+        many = [g for g in gs if round(g.c_raw[tidx]) >= 2]
+
+        def wr(sel):
+            return weighted_win_rate([g.win for g in sel], [g.weight for g in sel]).to_dict() if sel else None
+
+        out.append({"id": item, **wr(gs), "vs_0_1_tanks": wr(few), "vs_2plus_tanks": wr(many)})
+    out.sort(key=lambda d: -d["games"])
+    return out
+
+
 def boots_stats(games: list[Game], levels: dict) -> dict:
     tidx = TRAITS.index("ap_share")
     by_level: dict[str, list] = defaultdict(list)
@@ -89,9 +110,12 @@ def boots_stats(games: list[Game], levels: dict) -> dict:
 
 
 def path_info(games: list[Game], paths: list[tuple]) -> list[dict]:
+    by_path: dict[tuple, list[Game]] = defaultdict(list)
+    for g in games:
+        by_path[g.path[:3]].append(g)
     out = []
     for p in paths:
-        gs = [g for g in games if g.path[:3] == p]
+        gs = by_path.get(tuple(p), [])
         slots = Counter(g.boots_slot for g in gs if g.boots_slot is not None)
         wr = weighted_win_rate([g.win for g in gs], [g.weight for g in gs])
         out.append({"path": list(p), "games": len(gs), "raw_win_rate": wr.rate,
@@ -109,7 +133,9 @@ def build_bundle(store: Store, static: StaticData, champion_id: int, role: str, 
     games, info = load_games(store, champion_id, role, profiles, cfg)
     if not games:
         raise ValueError(f"No games for champion {champion_id} {role}.")
-    paths = candidate_paths(games, min_games)
+    # Every build players finished is scored: common ones get their own model term, rarer ones are
+    # fitted through their group and then scored individually (rare_paths).
+    paths, rare = model_paths(games)
     pages = candidate_pages(games, min_games)
     if not paths or not pages:
         raise ValueError(f"Not enough games for any path/page above {min_games} games "
@@ -120,18 +146,20 @@ def build_bundle(store: Store, static: StaticData, champion_id: int, role: str, 
     model = build_model(games, paths, pages).fit(games, penalties)
     model.meta["penalty_scales"] = tuning.get("scales")
     used = model.usable(games)
+    rare_paths = model.rare_effects(used, rare)
     levels = tercile_levels([g.c_raw for g in used])
 
     page_counts = Counter(g.page for g in used)
     path_counts = Counter(g.path[:3] for g in used)
-    popular = {"path": paths.index(path_counts.most_common(1)[0][0]), "page": pages.index(page_counts.most_common(1)[0][0])}
+    popular = {"path": model.path_index(path_counts.most_common(1)[0][0]), "page": pages.index(page_counts.most_common(1)[0][0])}
     start = Counter(tuple(sorted(g.row["start_items"])) for g in games if g.row.get("start_items"))
     shards = page_shards(games, pages)
 
     situational = situational_stats(games, static, levels)
     late = late_items(games, min_games)
-    referenced = {i for p in paths for i in p} | {int(k) for c in situational.values() for lv in c.values() for k in lv}
-    referenced |= {d["id"] for d in late} | {i for s in start for i in s}
+    referenced = {i for p in candidate_paths(used) for i in p} | {int(k) for c in situational.values() for lv in c.values() for k in lv}
+    first_items = first_item_stats(games)
+    referenced |= {d["id"] for d in late} | {i for s in start for i in s} | {d["id"] for d in first_items}
     boots = boots_stats(games, levels)
     referenced |= {int(k) for lv in boots.values() for k in lv}
 
@@ -150,11 +178,13 @@ def build_bundle(store: Store, static: StaticData, champion_id: int, role: str, 
         "model": model.to_dict(),
         "popular": popular,
         "page_shards": [list(shards.get(p, (5008, 5008, 5011))) for p in pages],
-        "path_info": path_info(used, paths),
+        "path_info": path_info(used, candidate_paths(used)),
+        "rare_paths": rare_paths,
         "start_items": list(start.most_common(1)[0][0]) if start else [],
         "boots": boots,
         "situational": situational,
         "late_items": late[:10],
+        "first_items": first_items,
         "levels": {k: list(v) for k, v in levels.items()},
         "profiles": {str(k): v for k, v in profiles.items()},
         "item_names": {str(i): static.item_name(i) for i in sorted(referenced)},

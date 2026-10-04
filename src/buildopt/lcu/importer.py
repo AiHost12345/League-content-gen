@@ -43,6 +43,7 @@ class Importer:
 
     def write_rune_page(self, name: str, primary: int, sub: int, perks: list[int], shards: list[int]) -> dict:
         self.ensure_champ_select()
+        log.info("writing rune page '%s %s'", self.prefix, name)
         body = {
             "name": f"{self.prefix} {name}"[:40],
             "primaryStyleId": primary,
@@ -95,13 +96,25 @@ class Importer:
 
     # ---- item set ----------------------------------------------------------
     def write_item_set(self, item_set: dict) -> None:
+        """Replace the app's own set for this champion, then read back to confirm the client saved it."""
         self.ensure_champ_select()
-        summoner = self.lcu.current_summoner()
-        sid = summoner["summonerId"]
+        summoner = self.lcu.current_summoner() or {}
+        sid = summoner.get("summonerId") or summoner.get("accountId")
+        if not sid:
+            raise ImportFailed(f"the client didn't report a summoner id ({sorted(summoner)})")
         path = f"/lol-item-sets/v1/item-sets/{sid}/sets"
         data = self.lcu.get(path) or {}
         sets = data.get("itemSets", [])
         champs = set(item_set["associatedChampions"])
         keep = [s for s in sets if not (s.get("title", "").startswith(self.prefix) and set(s.get("associatedChampions", [])) == champs)]
         body = {**data, "accountId": data.get("accountId", summoner.get("accountId")), "itemSets": keep + [item_set]}
+        log.info("writing item set '%s' (%d blocks) to %s", item_set["title"], len(item_set["blocks"]), path)
         self.lcu.put(path, body)
+        saved = self.lcu.get(path) or {}
+        if not any(s.get("title") == item_set["title"] for s in saved.get("itemSets", [])):
+            raise ImportFailed("the client accepted the item set but it wasn't there when read back")
+        log.info("item set saved")
+
+
+class ImportFailed(RuntimeError):
+    pass

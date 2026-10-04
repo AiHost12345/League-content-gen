@@ -21,6 +21,8 @@ class ConsoleUI:
             w(f"  why: {line}\n")
         if view.get("runner_up"):
             w(f"Runner-up: {view['runner_up']}\n")
+        for line in view.get("other_builds", []):
+            w(f"  also: {line}\n")
         if view.get("change"):
             w(f"Changed: {view['change']}\n")
         for line in view.get("extras", []):

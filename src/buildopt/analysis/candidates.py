@@ -8,10 +8,38 @@ from buildopt.analysis.dataset import Game
 from buildopt.stats import MIN_GAMES
 
 
-def candidate_paths(games: list[Game], min_games: int = MIN_GAMES, max_paths: int = 30) -> list[tuple[int, ...]]:
-    """All first-three-item prefixes above the sample threshold."""
+def candidate_paths(games: list[Game], min_games: int = 1, max_paths: int | None = None) -> list[tuple[int, ...]]:
+    """Every first-three-item build players finished (by default, no shortlist)."""
     counts = Counter(g.path[:3] for g in games if len(g.path) >= 3)
     return [p for p, n in counts.most_common(max_paths) if n >= min_games]
+
+
+ANY = 0  # placeholder item in a group key, e.g. (BoRK, BC, ANY) = "BoRK -> BC -> anything rarer"
+
+
+def model_paths(games: list[Game], min_games: int = 30) -> tuple[list[tuple[int, ...]], list[tuple[int, ...]]]:
+    """Split builds into the joint model's path terms and the rare builds scored on top of them.
+
+    Builds with ``min_games``+ games get their own term. Rarer builds are grouped by their first two
+    items, then by their first item, then into one catch-all group, so the model stays small. Each
+    rare build is still scored individually afterwards (see ``LoadoutModel.rare_effects``).
+    Returns (model paths including groups, rare builds).
+    """
+    counts = Counter(g.path[:3] for g in games if len(g.path) >= 3)
+    common = [p for p, n in counts.most_common() if n >= min_games]
+    rare = {p: n for p, n in counts.items() if n < min_games}
+    two = Counter()
+    for p, n in rare.items():
+        two[(p[0], p[1], ANY)] += n
+    groups2 = sorted(k for k, n in two.items() if n >= min_games)
+    one = Counter()
+    for p, n in rare.items():
+        if (p[0], p[1], ANY) not in groups2:
+            one[(p[0], ANY, ANY)] += n
+    groups1 = sorted(k for k, n in one.items() if n >= min_games)
+    leftover = any((p[0], p[1], ANY) not in groups2 and (p[0], ANY, ANY) not in groups1 for p in rare)
+    paths = common + groups2 + groups1 + ([(ANY, ANY, ANY)] if leftover else [])
+    return paths, sorted(rare)
 
 
 def _swap_kind(a: tuple, b: tuple) -> str | None:

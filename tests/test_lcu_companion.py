@@ -202,7 +202,7 @@ def test_companion_flow(cache, static, tmp_path):
     comp.on_session("Update", session(233, True, tanky))  # locked: write both
     assert ("POST", "/lol-perks/v1/pages") in lcu.log
     assert any(t["title"].startswith("BO: Briar") for t in lcu.sets["itemSets"])
-    assert "Titanic Hydra" in ui.views[-1]["build"]
+    assert ui.views[-1]["build"].split(" → ")[0] in ("Titanic Hydra", "Blade of The Ruined King")
     writes = len(lcu.log)
 
     comp.on_session("Update", session(233, True, tanky))  # nothing changed: no rewrite
@@ -210,7 +210,7 @@ def test_companion_flow(cache, static, tmp_path):
 
     comp.on_session("Update", session(233, True, squishy, phase="FINALIZATION", time_left=5000))  # top loadout flips
     assert len(lcu.log) > writes
-    assert ui.views[-1]["change"].startswith("Titanic Hydra → The Collector")
+    assert ui.views[-1]["change"].split(":")[0].endswith("→ The Collector")
     assert len([p for p in lcu.pages if p["name"].startswith("BO:")]) == 1
     assert len([t for t in lcu.sets["itemSets"] if t["title"].startswith("BO:")]) == 1
     assert comp.final_timer is not None
@@ -233,4 +233,39 @@ def test_companion_without_data(cache, tmp_path):
     ui = RecUI()
     comp = Companion(cache, ui, settings(tmp_path))
     comp.on_session("Update", session(99, True, []))
-    assert ui.statuses[-1].startswith("No data for champion 99")
+    assert ui.statuses[-1].startswith("No recommendations for Lux jungle yet")
+
+
+def test_item_set_written_even_when_rune_page_fails(cache, static, tmp_path):
+    """Regression: a rune page failure used to skip the item set silently."""
+    lcu = FakeLcu(pages=[{"id": 1, "name": "User", "isEditable": True}], owned=1)  # rune pages full
+    ui = RecUI()
+    results = []
+    ui.import_result = results.append
+    s = settings(tmp_path)
+    comp = Companion(cache, ui, s, importer=Importer(lcu, s, ask_page=lambda pages: None))  # user declines
+    comp.on_session("Update", session(233, True, [static.champion_id("Ornn")]))
+    assert any(t["title"].startswith("BO: Briar") for t in lcu.sets["itemSets"])
+    assert results[-1]["items"][0] and not results[-1]["runes"][0]
+    assert "rune page limit" in results[-1]["runes"][1]
+    assert ui.statuses[-1].startswith("Runes FAILED, item set written")
+
+
+def test_item_set_not_saved_is_reported(cache, static, tmp_path):
+    class DroppingLcu(FakeLcu):
+        def put(self, path, body):
+            if "item-sets" in path:
+                self.log.append(("PUT", path))
+                return None  # accepted, but nothing stored
+            return super().put(path, body)
+
+    lcu = DroppingLcu()
+    ui = RecUI()
+    results = []
+    ui.import_result = results.append
+    s = settings(tmp_path)
+    comp = Companion(cache, ui, s, importer=Importer(lcu, s))
+    comp.on_session("Update", session(233, True, [static.champion_id("Ornn")]))
+    ok, msg = results[-1]["items"]
+    assert not ok and "wasn't there when read back" in msg
+    assert results[-1]["runes"][0]

@@ -29,7 +29,7 @@ def _sync(settings: Settings, ui) -> None:
         ui.status(f"Bundle sync failed ({e}); using cached bundles")
 
 
-def connect_loop(settings: Settings, ui, stop: threading.Event) -> None:
+def connect_loop(settings: Settings, ui, stop: threading.Event, on_companion=None) -> None:
     cache = BundleCache(settings.bundle_dir)
     current = None
     events = None
@@ -62,6 +62,8 @@ def connect_loop(settings: Settings, ui, stop: threading.Event) -> None:
         cache.clear()
         importer = Importer(lcu, settings, ask_page=ui.ask_page)
         companion = Companion(cache, ui, settings, importer=importer, read_only=read_only)
+        if on_companion:
+            on_companion(companion)
         events = LcuEvents(lock, companion.on_session)
         events.start()
         ui.status("Connected to the League client" + (" (auto-import off)" if not settings.auto_import else ""))

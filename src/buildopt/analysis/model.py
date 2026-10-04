@@ -139,6 +139,7 @@ class LoadoutModel:
     control_std: list[float]
     pairs: list[tuple[int, int]]  # (path index, page index) with their own interaction term
     enemy_terms: list[tuple[int, str]]  # (enemy champion id, enemy role)
+    trait_paths: list[int] = field(default_factory=list)  # path indices with their own "when does it win" terms
     beta: np.ndarray | None = None
     cov: np.ndarray | None = None
     baseline_rate: float = 0.5
@@ -152,7 +153,7 @@ class LoadoutModel:
 
     def layout(self) -> dict[str, tuple[int, int]]:
         P, R, K, T = len(self.paths), len(self.pages), len(self.keystones), self.T
-        sizes = [("intercept", 1), ("path", P), ("page", R), ("trait", T), ("path_trait", P * T),
+        sizes = [("intercept", 1), ("path", P), ("page", R), ("trait", T), ("path_trait", len(self.trait_paths) * T),
                  ("keystone_trait", K * T), ("pair", len(self.pairs)), ("control", len(CONTROLS)),
                  ("enemy", len(self.enemy_terms))]
         out, start = {}, 0
@@ -192,8 +193,10 @@ class LoadoutModel:
         x[lay["page"][0] + page_i] = 1.0
         a = lay["trait"][0]
         x[a:a + T] = cz
-        a = lay["path_trait"][0] + path_i * T
-        x[a:a + T] = cz
+        ti = self.trait_index.get(path_i)
+        if ti is not None:
+            a = lay["path_trait"][0] + ti * T
+            x[a:a + T] = cz
         k = self.keystones.index(self.pages[page_i][2])
         a = lay["keystone_trait"][0] + k * T
         x[a:a + T] = cz
@@ -210,6 +213,29 @@ class LoadoutModel:
                     x[a + j] = 1.0
         return x
 
+    def path_index(self, triple: tuple) -> int | None:
+        """Model term for a build: its own term, else its 2-item group, 1-item group, or the catch-all."""
+        lookup = self.__dict__.get("_path_lookup")
+        if lookup is None or len(lookup) != len(self.paths):
+            lookup = {tuple(p): i for i, p in enumerate(self.paths)}
+            self.__dict__["_path_lookup"] = lookup
+        triple = tuple(triple[:3])
+        if len(triple) < 3:
+            return None
+        for key in (triple, (triple[0], triple[1], 0), (triple[0], 0, 0), (0, 0, 0)):
+            if key in lookup:
+                return lookup[key]
+        return None
+
+    @property
+    def trait_index(self) -> dict[int, int]:
+        """path index -> position in the path x trait block (only paths with enough games have one)."""
+        cache = self.__dict__.get("_trait_cache")
+        if cache is None or len(cache) != len(self.trait_paths):
+            cache = {p: i for i, p in enumerate(self.trait_paths)}
+            self.__dict__["_trait_cache"] = cache
+        return cache
+
     @property
     def _pair_index(self) -> dict:
         cache = self.__dict__.get("_pair_cache")
@@ -223,11 +249,10 @@ class LoadoutModel:
         return (raw - np.asarray(self.control_mean)) / np.asarray(self.control_std)
 
     def design(self, games: list[Game]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        path_idx = {p: i for i, p in enumerate(self.paths)}
         page_idx = {p: i for i, p in enumerate(self.pages)}
         X, y, w = [], [], []
         for g in games:
-            pi = path_idx.get(g.path[:3])
+            pi = self.path_index(g.path[:3])
             ri = page_idx.get(g.page)
             if pi is None or ri is None:
                 continue
@@ -240,8 +265,30 @@ class LoadoutModel:
         return np.vstack(X), np.array(y, float), np.array(w, float)
 
     def usable(self, games: list[Game]) -> list[Game]:
-        paths, pages = set(self.paths), set(self.pages)
-        return [g for g in games if g.path[:3] in paths and g.page in pages]
+        pages = set(self.pages)
+        return [g for g in games if g.page in pages and self.path_index(g.path[:3]) is not None]
+
+    def rare_effects(self, games: list[Game], rare: list[tuple], prior_games: float = 30.0) -> list[dict]:
+        """Score each rare build individually on top of its group.
+
+        For a build's own games, compare actual wins with what its group predicts (same comp, same game
+        state). The difference on the log-odds scale is shrunk toward zero with a prior worth
+        ``prior_games`` games, so a handful of lucky games can't produce an extreme win rate.
+        """
+        rare_set = set(rare)
+        by_path: dict[tuple, list[Game]] = {}
+        for g in self.usable(games):
+            if g.path[:3] in rare_set:
+                by_path.setdefault(g.path[:3], []).append(g)
+        out = []
+        for path, gs in by_path.items():
+            X, y, w = self.design(gs)
+            p = 1.0 / (1.0 + np.exp(-(X @ self.beta)))
+            info = float(np.sum(w * p * (1 - p))) + prior_games * 0.25
+            delta = float(np.sum(w * (y - p))) / info
+            out.append({"path": list(path), "group": self.path_index(path), "delta": round(delta, 5),
+                        "var": round(1.0 / info, 6), "games": len(gs)})
+        return out
 
     # ---- fit / predict -------------------------------------------------
     def fit(self, games: list[Game], pen: Penalties | None = None) -> "LoadoutModel":
@@ -292,6 +339,7 @@ class LoadoutModel:
             "control_std": self.control_std,
             "pairs": [list(p) for p in self.pairs],
             "enemy_terms": [list(t) for t in self.enemy_terms],
+            "trait_paths": self.trait_paths,
             "beta": self.beta.tolist(),
             "cov_f32": base64.b64encode(self.cov.astype(np.float32).tobytes()).decode("ascii"),
             "baseline_rate": self.baseline_rate,
@@ -311,6 +359,7 @@ class LoadoutModel:
             control_std=d["control_std"],
             pairs=[tuple(p) for p in d["pairs"]],
             enemy_terms=[(int(c), r) for c, r in d["enemy_terms"]],
+            trait_paths=d.get("trait_paths", list(range(len(d["paths"])))),
             baseline_rate=d.get("baseline_rate", 0.5),
             state_offsets=d.get("state_offsets", [0.0]),
             meta=d.get("meta", {}),
@@ -322,20 +371,25 @@ class LoadoutModel:
 
 
 def build_model(games: list[Game], paths: list[tuple], pages: list[tuple], min_pair_games: int = 30,
-                min_enemy_games: int = 300) -> LoadoutModel:
+                min_enemy_games: int = 300, min_trait_games: int = 100) -> LoadoutModel:
     """Set up the feature space (standardisation, interaction pairs, enemy terms) from training games."""
-    path_set, page_set = set(paths), set(pages)
-    use = [g for g in games if g.path[:3] in path_set and g.page in page_set]
+    probe = LoadoutModel(paths=list(paths), pages=list(pages), keystones=[], trait_mean=[], trait_std=[],
+                         control_mean=[], control_std=[], pairs=[], enemy_terms=[])
+    page_set = set(pages)
+    use = [g for g in games if g.page in page_set and probe.path_index(g.path[:3]) is not None]
     if not use:
         raise ValueError("No games match the candidate paths and pages.")
     C = np.array([g.c_raw for g in use], float)
     S = np.array([[g.first_lane_gd, g.first_team_gd, g.first_min] for g in use], float)
     tstd = C.std(axis=0)
     sstd = S.std(axis=0)
-    path_i = {p: i for i, p in enumerate(paths)}
     page_i = {p: i for i, p in enumerate(pages)}
-    pair_counts = Counter((path_i[g.path[:3]], page_i[g.page]) for g in use)
+    pair_counts = Counter((probe.path_index(g.path[:3]), page_i[g.page]) for g in use)
     pairs = sorted(p for p, n in pair_counts.items() if n >= min_pair_games)
+    # Every path gets its own win-rate term; only paths with enough games also get comp-trait terms,
+    # so hundreds of rare builds don't blow up the model.
+    path_counts = Counter(probe.path_index(g.path[:3]) for g in use)
+    trait_paths = sorted(i for i, n in path_counts.items() if n >= min_trait_games)
     # Per-champion terms only for the exact matchup (the enemy in the same role, e.g. the enemy jungler).
     enemy_counts = Counter((e["champion_id"], e["role"]) for g in use for e in g.enemies if e["role"] == g.row["role"])
     enemy_terms = sorted(t for t, n in enemy_counts.items() if n >= min_enemy_games)
@@ -349,4 +403,5 @@ def build_model(games: list[Game], paths: list[tuple], pages: list[tuple], min_p
         control_std=np.where(sstd > 1e-9, sstd, 1.0).tolist(),
         pairs=pairs,
         enemy_terms=enemy_terms,
+        trait_paths=trait_paths,
     )

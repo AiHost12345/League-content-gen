@@ -61,6 +61,8 @@ def apply_theme(root: tk.Tk) -> None:
     st.configure("Accent.TButton", background=GOLD, foreground=BG, font=(FONT, 10, "bold"))
     st.map("Accent.TButton", background=[("active", "#e0c48a"), ("disabled", "#5c5240")])
     st.configure("TCheckbutton", background=BG, foreground=TEXT)
+    st.configure("TRadiobutton", background=BG, foreground=TEXT)
+    st.map("TRadiobutton", background=[("active", BG)])
     st.map("TCheckbutton", background=[("active", BG)])
     st.configure("Panel.TCheckbutton", background=PANEL, foreground=TEXT)
     st.map("Panel.TCheckbutton", background=[("active", PANEL)])
@@ -145,8 +147,8 @@ class LoadoutCard(ttk.Frame):
         def row(label, value, style="Big.TLabel"):
             f = ttk.Frame(b, style="Panel.TFrame")
             f.pack(fill="x", pady=(10, 0))
-            ttk.Label(f, text=label, style="PanelGold.TLabel", width=12).pack(side="left", anchor="n")
-            ttk.Label(f, text=value, style=style, wraplength=560, justify="left").pack(side="left", anchor="w")
+            ttk.Label(f, text=label, style="PanelGold.TLabel", width=14).pack(side="left", anchor="n")
+            ttk.Label(f, text=value, style=style, wraplength=540, justify="left").pack(side="left", anchor="w")
 
         row("RUNES", view["runes"])
         row("BUILD", view["build"])
@@ -155,6 +157,8 @@ class LoadoutCard(ttk.Frame):
             row("WHY", "\n".join(f"• {w}" for w in view["why"]), "Panel.TLabel")
         if view.get("runner_up"):
             row("RUNNER-UP", view["runner_up"], "Panel.TLabel")
+        if view.get("other_builds"):
+            row("OTHER BUILDS", "\n".join(view["other_builds"]), "Panel.TLabel")
         if view.get("change"):
             row("CHANGED", view["change"], "Win.TLabel")
         for line in view.get("extras", []):
@@ -176,6 +180,8 @@ class App:
         self.static = ddragon.load(offline=True)  # names for menus; real data is fetched when collecting
         self.champ_names = sorted(c["name"] for c in self.static.champions.values())
         self.collect_stop: threading.Event | None = None
+        self.companion = None
+        self.log_path = app_dir() / "buildopt.log"
         self.collect_started = 0.0
         self.collect_start_count = 0
 
@@ -255,6 +261,15 @@ class App:
         logger = logging.getLogger("buildopt")
         logger.setLevel(logging.INFO)
         logger.addHandler(h)
+        # A log file the user can send when something goes wrong.
+        from logging.handlers import RotatingFileHandler
+
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = RotatingFileHandler(self.log_path, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        fh.setLevel(logging.INFO)
+        logger.addHandler(fh)
+        logger.info("League Build Optimizer %s started", __version__)
 
     # ---- Champ Select tab ------------------------------------------------------
     def _build_live(self, nb) -> ttk.Frame:
@@ -270,9 +285,42 @@ class App:
         self.live_card = LoadoutCard(tab, "Open League and enter champ select. Your recommendation appears here "
                                           "as soon as you hover a champion you have data for.")
         self.live_card.pack(fill="both", expand=True)
+        imp = ttk.Frame(tab, style="Panel.TFrame", padding=(12, 8))
+        imp.pack(fill="x", pady=(8, 0))
+        ttk.Label(imp, text="LAST IMPORT", style="PanelGold.TLabel").grid(row=0, column=0, sticky="w")
+        self.import_runes = ttk.Label(imp, text="Runes: nothing written yet", style="PanelMuted.TLabel", wraplength=520)
+        self.import_runes.grid(row=1, column=0, sticky="w")
+        self.import_items = ttk.Label(imp, text="Item set: nothing written yet", style="PanelMuted.TLabel", wraplength=520)
+        self.import_items.grid(row=2, column=0, sticky="w")
+        btns = ttk.Frame(imp, style="Panel.TFrame")
+        btns.grid(row=0, column=1, rowspan=3, sticky="e")
+        imp.columnconfigure(0, weight=1)
+        ttk.Button(btns, text="Import again now", command=self._import_now).pack(fill="x")
+        ttk.Button(btns, text="Open log file", command=lambda: open_path(self.log_path)).pack(fill="x", pady=(4, 0))
+        ttk.Label(tab, text="In game, the item set is in the shop's item set list (look for the set named 'BO: …').",
+                  style="Muted.TLabel", wraplength=760).pack(fill="x", pady=(6, 0))
         self.live_status = ttk.Label(tab, text="Starting…", style="Muted.TLabel", wraplength=760)
-        self.live_status.pack(fill="x", pady=(8, 0))
+        self.live_status.pack(fill="x", pady=(4, 0))
         return tab
+
+    def show_import_result(self, result: dict) -> None:
+        for label, key, name in ((self.import_runes, "runes", "Runes"), (self.import_items, "items", "Item set")):
+            ok, msg = result[key]
+            label.configure(text=f"{'✓' if ok else '✗'} {name}: {'written ' + msg if ok else msg}",
+                            foreground=TEAL if ok else RED)
+
+    def _import_now(self) -> None:
+        comp = self.companion
+        if comp is None or comp.rec is None:
+            messagebox.showinfo("Nothing to import", "Get into champ select with a champion you have recommendations "
+                                                     "for, then try again.")
+            return
+        if comp.read_only:
+            messagebox.showinfo("Read-only", "The app couldn't talk to all the client features it needs, so it's in "
+                                             "read-only mode. Open the log file and send it over so it can be fixed.")
+            return
+        self.import_items.configure(text="Item set: writing…", foreground=MUTED)
+        threading.Thread(target=comp.write, daemon=True).start()
 
     def _toggle_auto(self) -> None:
         self.settings.auto_import = self.auto_var.get()
@@ -291,6 +339,9 @@ class App:
             def status(self, message):
                 app.post(app._set_live_status, message)
 
+            def import_result(self, result):
+                app.post(app.show_import_result, result)
+
             def ask_page(self, pages):
                 done = threading.Event()
                 result = [None]
@@ -303,7 +354,10 @@ class App:
                 done.wait()
                 return result[0]
 
-        app_main.connect_loop(self.settings, UIAdapter(), threading.Event())
+        def keep(companion):
+            app.companion = companion
+
+        app_main.connect_loop(self.settings, UIAdapter(), threading.Event(), on_companion=keep)
 
     def _set_live_status(self, message: str) -> None:
         self.live_status.configure(text=message)
@@ -561,9 +615,80 @@ class App:
         btns.pack(fill="x", pady=10)
         ttk.Button(btns, text="Recommend", style="Accent.TButton", command=self._recommend).pack(side="left")
         ttk.Button(btns, text="Clear", command=lambda: [v.set("") for v in self.enemy_vars]).pack(side="left", padx=6)
+        ttk.Button(btns, text="First items in my data", command=self._show_first_items).pack(side="right")
+        ttk.Button(btns, text="All builds for this comp", command=self._show_all_builds).pack(side="right", padx=6)
         self.try_card = LoadoutCard(tab, "Pick the champion you play and up to five enemies, then press Recommend.")
         self.try_card.pack(fill="both", expand=True)
         return tab
+
+    def _show_all_builds(self) -> None:
+        """Every build players finished, ranked for the enemy comp entered above."""
+        if not getattr(self, "last_try", None):
+            self._recommend()
+        if not getattr(self, "last_try", None):
+            return
+        scorer, rec = self.last_try
+        builds = scorer.top_builds(rec.ranked, len(rec.ranked))
+        win = tk.Toplevel(self.root)
+        win.title("All builds for this comp")
+        win.configure(bg=BG)
+        win.geometry("980x540")
+        order = "win rate" if self.settings.rank_by == "win_rate" else "safest first (lower bound)"
+        ttk.Label(win, text=f"{len(builds)} builds from your games, ranked by {order}. A build with only a few "
+                            "games mostly reflects builds that start the same way, so it's marked low "
+                            f"confidence; only builds with {self.settings.min_build_games}+ games can be the "
+                            "recommendation (change this in Settings).",
+                  wraplength=820, justify="left", padding=12).pack(anchor="w")
+        cols = ("rank", "build", "win", "range", "games", "conf", "keystone")
+        frame = ttk.Frame(win)
+        frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        tree = ttk.Treeview(frame, columns=cols, show="headings")
+        bar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=bar.set)
+        for c, title, w in zip(cols, ("#", "Build (first 3 items)", "Win rate", "95% range", "Games", "Confidence",
+                                      "Best keystone"), (40, 380, 85, 100, 75, 105, 150)):
+            tree.heading(c, text=title)
+            tree.column(c, width=w, anchor="w" if c in ("build", "keystone") else "e")
+        for i, l in enumerate(builds, 1):
+            tree.insert("", "end", values=(i, scorer.path_label(l.path), f"{l.win_rate:.1%}",
+                                           f"{l.lo:.0%}–{l.hi:.0%}", f"{l.games:,}", l.confidence,
+                                           scorer.perk(l.keystone)))
+        bar.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+
+    def _show_first_items(self) -> None:
+        """Every first item in the collected games, so you can see what the app is choosing from."""
+        choice = next((v for k, v in self.bundle_choices.items() if k == self.try_champ_var.get()), None)
+        if not choice:
+            messagebox.showinfo("No data", "Build recommendations for a champion first (Get Data tab).")
+            return
+        scorer = self.cache.scorer(*choice)
+        items = scorer.bundle.get("first_items")
+        if not items:
+            messagebox.showinfo("Rebuild needed", "These recommendations were built with an older version. "
+                                                  "Press 'Build recommendations' again (or redo the demo).")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("First items in your data")
+        win.configure(bg=BG)
+        ttk.Label(win, text=f"First completed item in {scorer.bundle['data_version']['games_used']:,} "
+                            f"{scorer.bundle['champion_name']} games. The app can only recommend builds that "
+                            "show up here often enough (50+ games for a full 3-item path).",
+                  wraplength=620, justify="left", padding=12).pack(anchor="w")
+        cols = ("item", "games", "all", "few", "many")
+        tree = ttk.Treeview(win, columns=cols, show="headings", height=min(16, len(items)))
+        for c, title, w in zip(cols, ("First item", "Games", "Win rate", "vs 0–1 tanks", "vs 2+ tanks"),
+                               (220, 70, 90, 110, 110)):
+            tree.heading(c, text=title)
+            tree.column(c, width=w, anchor="w" if c == "item" else "e")
+
+        def pct(d):
+            return f"{d['win_rate']:.1%} ({d['games']})" if d else "—"
+
+        for d in items:
+            tree.insert("", "end", values=(scorer.item(d["id"]), f"{d['games']:,}", f"{d['win_rate']:.1%}",
+                                           pct(d.get("vs_0_1_tanks")), pct(d.get("vs_2plus_tanks"))))
+        tree.pack(padx=12, pady=(0, 12), fill="both", expand=True)
 
     def refresh_bundles(self) -> None:
         self.cache = BundleCache(self.settings.bundle_dir)
@@ -605,7 +730,8 @@ class App:
                 return
         scorer = self.cache.scorer(*choice)
         roles = assign_roles(enemies, scorer.profiles)
-        rec = scorer.recommend(enemies, roles)
+        rec = scorer.recommend(enemies, roles, rank_by=self.settings.rank_by, min_games=self.settings.min_build_games)
+        self.last_try = (scorer, rec)
         view = recommendation_view(scorer, rec, roles, enemies=enemies).as_dict()
         blocks = [(b["type"], ", ".join(scorer.item(int(i["id"])) for i in b["items"])) for b in build_blocks(scorer, rec)]
         self.try_card.show(view, blocks)
@@ -625,6 +751,24 @@ class App:
         ttk.Entry(row, textvariable=self.league_var, width=60).pack(side="left")
         ttk.Button(row, text="Browse…", command=self._browse_league).pack(side="left", padx=6)
 
+        ttk.Label(tab, text="How to pick the build", style="H2.TLabel").pack(anchor="w", pady=(16, 0))
+        self.rank_var = tk.StringVar(value=s.rank_by)
+        ttk.Radiobutton(tab, text="Highest win rate (every build counts, even rare ones)", value="win_rate",
+                        variable=self.rank_var, command=self._save_rank).pack(anchor="w")
+        ttk.Radiobutton(tab, text="Safest (prefers builds with lots of games behind them)", value="lower_bound",
+                        variable=self.rank_var, command=self._save_rank).pack(anchor="w")
+
+        row = ttk.Frame(tab)
+        row.pack(anchor="w", pady=(6, 0))
+        ttk.Label(row, text="A build needs at least").pack(side="left")
+        self.min_games_var = tk.StringVar(value=str(s.min_build_games))
+        e = ttk.Entry(row, textvariable=self.min_games_var, width=5)
+        e.pack(side="left", padx=6)
+        e.bind("<FocusOut>", lambda ev: self._save_min_games())
+        e.bind("<Return>", lambda ev: self._save_min_games())
+        ttk.Label(row, text="games to be recommended (1 = any build). All builds are always listed in "
+                            "'All builds for this comp'.", style="Muted.TLabel").pack(side="left")
+
         ttk.Label(tab, text="Importing", style="H2.TLabel").pack(anchor="w", pady=(16, 0))
         ttk.Label(tab, text=f"The app only creates and replaces rune pages and item sets whose name starts with "
                             f"'{s.page_prefix}'. Your own pages are never deleted. If all your rune pages are "
@@ -643,6 +787,18 @@ class App:
                             "ranks or match histories. Not endorsed by Riot Games.",
                   style="Muted.TLabel", wraplength=760, justify="left").pack(anchor="w")
         return tab
+
+    def _save_min_games(self) -> None:
+        try:
+            self.settings.min_build_games = max(1, int(self.min_games_var.get()))
+        except ValueError:
+            self.min_games_var.set(str(self.settings.min_build_games))
+            return
+        self.settings.save()
+
+    def _save_rank(self) -> None:
+        self.settings.rank_by = self.rank_var.get()
+        self.settings.save()
 
     def _browse_league(self) -> None:
         path = filedialog.askdirectory(title="Pick your League of Legends folder")

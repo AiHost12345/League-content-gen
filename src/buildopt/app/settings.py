@@ -22,6 +22,8 @@ class Settings:
     bundle_dir: str = field(default_factory=lambda: str(app_dir() / "bundles"))
     league_path: str | None = None
     final_write_lead_ms: int = 3000  # final write this long before finalization ends
+    rank_by: str = "win_rate"  # "win_rate" (every build eligible) or "lower_bound" (safest, favours common builds)
+    min_build_games: int = 20  # a build needs this many games before it can be the recommendation (1 = any)
     # Data collection (desktop app "Get data" tab)
     api_key: str = ""
     regions: list[str] = field(default_factory=lambda: ["na1", "euw1", "kr"])

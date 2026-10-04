@@ -4,7 +4,8 @@ Produces rows in exactly the shape the parser emits, so the whole pipeline
 (bundle, comparisons, scoring, item sets, companion) can run without a Riot API
 key. The planted ground truth mirrors the design doc's Briar question:
 
-* Collector -> BC wins with 0-1 enemy tanks; Titanic -> BC pulls ahead at 2+.
+* Collector -> BC wins with 0-1 enemy tanks; Titanic -> BC pulls ahead at 2+,
+  and Blade of the Ruined King is best into very tanky comps.
 * Players buy Collector more often when already ahead (selection bias), so the
   raw Collector win rate is inflated.
 * Chempunk third is better into heavy healing; Lethal Tempo pairs with
@@ -37,12 +38,14 @@ POOLS = {
 ROLES = list(POOLS)
 
 COLLECTOR, BC, TITANIC, DD, STERAKS, ECLIPSE, CHEMPUNK, SV = 6676, 3071, 3748, 6333, 3053, 6692, 6609, 3065
+BORK = 3153
 STEELCAPS, MERCS = 3047, 3111
 LATE_POOL = [3026, 3156, 6694, 3143, 4401, 3075, 3053, 3065, 6333, 6609, 3074, 6610]
 PATHS = [  # (path, popularity)
     ((COLLECTOR, BC, DD), 1.2), ((TITANIC, BC, DD), 1.2), ((COLLECTOR, BC, STERAKS), 0.8),
     ((TITANIC, BC, STERAKS), 0.8), ((ECLIPSE, BC, DD), 0.6), ((TITANIC, BC, SV), 0.5),
     ((TITANIC, BC, CHEMPUNK), 0.5), ((COLLECTOR, BC, CHEMPUNK), 0.4),
+    ((BORK, BC, DD), 0.6), ((BORK, BC, STERAKS), 0.4),
 ]
 ROUTES = {  # route name -> zone anchors at minutes 1..6 (blue-side coordinates)
     "red start": [(7800, 4000), (8400, 2700), (7000, 5400), (3800, 7900), (4400, 9600), (5000, 9000)],
@@ -78,6 +81,8 @@ def _true_effect(path: tuple, page: tuple, c: list[float], lee_sin: bool, lane_g
         eta += 0.30 - 0.25 * tanks
     elif first == TITANIC:
         eta += -0.08 + 0.05 * tanks
+    elif first == BORK:  # %-health damage: weak early, strong into a tanky frontline
+        eta += -0.20 + 0.10 * tanks
     else:
         eta -= 0.10
     eta += {CHEMPUNK: -0.05 + 0.20 * z_heal, STERAKS: 0.08 * z_burst, SV: -0.05 + 0.12 * z_ap}.get(third, 0.0)

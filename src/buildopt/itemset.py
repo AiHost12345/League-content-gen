@@ -39,7 +39,7 @@ def build_blocks(scorer: Scorer, rec: Recommendation) -> list[dict]:
         if not item:
             continue
         reason = scorer.situational_reason(cat, c)
-        label = {"anti-heal": "anti-heal", "armor": "armor", "mr": "MR", "survive": "survive"}[cat]
+        label = {"anti-tank": "anti-tank", "anti-heal": "anti-heal", "armor": "armor", "mr": "MR", "survive": "survive"}[cat]
         blocks.append(_block(f"Situational: {label}" + (f" ({reason})" if reason else ""), [item]))
         used.add(item)
     late = scorer.late_game(used)

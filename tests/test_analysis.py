@@ -87,3 +87,24 @@ def test_evaluation_gate(games):
     assert res["test_games"] > 500
     assert ll["model_with_game_state"] > ll["champion_average"]
     assert res["gate_passed"]
+
+
+def test_rare_builds_are_grouped_then_scored_individually(games):
+    """Rare builds don't get dropped: they're fitted via their group and each gets its own shrunk adjustment."""
+    import copy
+
+    from buildopt.analysis.candidates import model_paths
+    from buildopt.analysis.model import build_model, Penalties
+
+    games = [copy.copy(g) for g in games]
+    rare = (3153, 3071, 3026)  # BoRK -> BC -> Guardian Angel, made rare and always winning
+    for g in games[:12]:
+        g.path, g.win = rare, 1
+    paths, rare_list = model_paths(games, min_games=30)
+    assert rare in rare_list and rare not in paths
+    m = build_model(games, paths, candidate_pages(games)).fit(games, Penalties())
+    group = m.paths[m.path_index(rare)]
+    assert 0 in group and all(a in (b, 0) for a, b in zip(group, rare))  # a group it belongs to
+    eff = {tuple(r["path"]): r for r in m.rare_effects(games, rare_list)}[rare]
+    assert eff["games"] == 12
+    assert 0 < eff["delta"] < 1.5  # 12/12 wins moves it up, but shrinkage keeps it from going extreme

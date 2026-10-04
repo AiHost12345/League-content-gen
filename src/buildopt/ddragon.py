@@ -26,7 +26,9 @@ SHARD_ROWS = (
 SHARD_NAMES = {k: v for row in SHARD_ROWS for k, v in row.items()}
 
 # Situational item categories shown in the item set.
-CATEGORIES = ("anti-heal", "armor", "mr", "survive")
+CATEGORIES = ("anti-tank", "anti-heal", "armor", "mr", "survive")
+# Items whose damage scales with the target's health (not visible from Data Dragon tags).
+HEALTH_DAMAGE_ITEMS = {3153, 6653, 3302}  # Blade of the Ruined King, Liandry's Torment, Terminus
 
 
 def _snapshot() -> dict:
@@ -161,6 +163,8 @@ class StaticData:
             return []
         tags = set(it["tags"])
         cats = []
+        if tags & {"ArmorPenetration", "MagicPenetration"} or item_id in HEALTH_DAMAGE_ITEMS:
+            cats.append("anti-tank")
         if it.get("grievous"):
             cats.append("anti-heal")
         if "Armor" in tags:

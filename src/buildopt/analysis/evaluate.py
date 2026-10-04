@@ -12,7 +12,7 @@ from collections import defaultdict
 
 import numpy as np
 
-from buildopt.analysis.candidates import candidate_pages, candidate_paths
+from buildopt.analysis.candidates import candidate_pages, model_paths
 from buildopt.analysis.dataset import Game
 from buildopt.analysis.model import Penalties, build_model, tune_penalties
 from buildopt.stats import MIN_GAMES
@@ -32,7 +32,7 @@ def _ll(p: np.ndarray, y: np.ndarray, w: np.ndarray) -> float:
 
 def evaluate(games: list[Game], min_games: int = MIN_GAMES, penalties: Penalties | None = None) -> dict:
     train, test = split(games)
-    paths = candidate_paths(train, min_games)
+    paths, _ = model_paths(train)
     pages = candidate_pages(train, min_games)
     tuning = {}
     if penalties is None:
@@ -43,12 +43,11 @@ def evaluate(games: list[Game], min_games: int = MIN_GAMES, penalties: Penalties
         raise ValueError("No held-out games cover the candidate paths and pages.")
     y = np.array([g.win for g in test], float)
     w = np.array([g.weight for g in test], float)
-    pi = {p: i for i, p in enumerate(model.paths)}
     ri = {p: i for i, p in enumerate(model.pages)}
 
     def predict(with_state: bool) -> np.ndarray:
         X = np.vstack([
-            model.row(pi[g.path[:3]], ri[g.page], model.standardise_traits(g.c_raw),
+            model.row(model.path_index(g.path[:3]), ri[g.page], model.standardise_traits(g.c_raw),
                       model.controls(g) if with_state else None,
                       {(e["champion_id"], e["role"]) for e in g.enemies})
             for g in test
